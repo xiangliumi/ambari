@@ -300,6 +300,7 @@ define(['require',
             eventName: Globals.eventName.serviceLogsExcludeColumns,
             myFormatData: function (query, searchCollection) {
               var obj = ViewUtils.replaceColumnNamesWithKeys(searchCollection, Globals.invertedServiceLogMappings, false);
+              console.log(obj)
               return {
                 excludeQuery: JSON.stringify(obj),
                 query: query
