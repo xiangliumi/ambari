@@ -18,18 +18,18 @@
  */
 package org.apache.ambari.logsearch.query.converter;
 
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.convert.ConversionService;
 import org.springframework.core.convert.converter.Converter;
 import org.springframework.core.convert.converter.ConverterRegistry;
 
 import javax.annotation.PostConstruct;
 import javax.inject.Inject;
+import javax.inject.Named;
 
 public abstract class AbstractConverterAware<SOURCE, RESULT> implements Converter<SOURCE, RESULT> {
 
   @Inject
-  @Qualifier("conversionService")
+  @Named("conversionService")
   private ConversionService conversionService;
 
   public ConversionService getConversionService() {

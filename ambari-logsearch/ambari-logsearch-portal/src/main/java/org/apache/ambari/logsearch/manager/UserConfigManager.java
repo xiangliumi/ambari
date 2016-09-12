@@ -27,7 +27,6 @@ import java.util.List;
 import org.apache.ambari.logsearch.common.LogSearchConstants;
 import org.apache.ambari.logsearch.common.MessageEnums;
 import org.apache.ambari.logsearch.dao.UserConfigSolrDao;
-import org.apache.ambari.logsearch.query.QueryGeneration;
 import org.apache.ambari.logsearch.util.JSONUtil;
 import org.apache.ambari.logsearch.util.RESTErrorUtil;
 import org.apache.ambari.logsearch.util.SolrUtil;
@@ -45,18 +44,16 @@ import org.apache.solr.common.SolrDocument;
 import org.apache.solr.common.SolrDocumentList;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrInputDocument;
-import org.springframework.stereotype.Component;
 
 import javax.inject.Inject;
+import javax.inject.Named;
 
-@Component
+@Named
 public class UserConfigManager extends JsonManagerBase {
 
   private static final Logger logger = Logger.getLogger(UserConfigManager.class);
   @Inject
   private UserConfigSolrDao userConfigSolrDao;
-  @Inject
-  private QueryGeneration queryGenerator;
 
   public String saveUserConfig(VUserConfig vHistory) {
 
@@ -82,9 +79,9 @@ public class UserConfigManager extends JsonManagerBase {
     }
     // Check whether the Filter Name exists in solr
     SolrQuery solrQuery = new SolrQuery();
-    SolrUtil.setMainQuery(solrQuery, null);
-    queryGenerator.setSingleIncludeFilter(solrQuery, LogSearchConstants.FILTER_NAME, SolrUtil.makeSearcableString(filterName));
-    queryGenerator.setSingleIncludeFilter(solrQuery, LogSearchConstants.USER_NAME, loggedInUserName);
+    solrQuery.setQuery("*:*");
+    solrQuery.addFilterQuery(String.format("%s:%s", LogSearchConstants.FILTER_NAME, SolrUtil.makeSearcableString(filterName)));
+    solrQuery.addFilterQuery(String.format("%s:%s", LogSearchConstants.USER_NAME, loggedInUserName));
     try {
       QueryResponse queryResponse = userConfigSolrDao.process(solrQuery);
       if (queryResponse != null) {
@@ -94,7 +91,7 @@ public class UserConfigManager extends JsonManagerBase {
           throw RESTErrorUtil.createRESTException("Filtername is already present", MessageEnums.INVALID_INPUT_DATA);
         }
       }
-    } catch (SolrException | SolrServerException | IOException e) {
+    } catch (SolrException e) {
       logger.error("Error in checking same filtername config", e);
       throw RESTErrorUtil.createRESTException(MessageEnums.SOLR_ERROR.getMessage().getMessage(), MessageEnums.ERROR_SYSTEM);
     }
@@ -122,7 +119,7 @@ public class UserConfigManager extends JsonManagerBase {
         if (numFound > 0) {
           return true;
         }
-      } catch (SolrException | SolrServerException | IOException e) {
+      } catch (SolrException e) {
         logger.error("Error while checking if userConfig is unique.", e);
       }
     }
@@ -163,13 +160,12 @@ public class UserConfigManager extends JsonManagerBase {
     filterName = StringUtils.isBlank(filterName) ? "*" : "*" + filterName + "*";
 
     try {
-
       SolrQuery userConfigQuery = new SolrQuery();
-      SolrUtil.setMainQuery(userConfigQuery, null);
-      queryGenerator.setPagination(userConfigQuery, searchCriteria);
-      queryGenerator.setSingleIncludeFilter(userConfigQuery, LogSearchConstants.ROW_TYPE, rowType);
-      queryGenerator.setSingleORFilter(userConfigQuery, LogSearchConstants.USER_NAME, userName, LogSearchConstants.SHARE_NAME_LIST, userName);
-      queryGenerator.setSingleIncludeFilter(userConfigQuery, LogSearchConstants.FILTER_NAME, SolrUtil.makeSearcableString(filterName));
+      userConfigQuery.setQuery("*:*");
+      setPagination(userConfigQuery, searchCriteria);
+      userConfigQuery.addFilterQuery(String.format("%s:%s", LogSearchConstants.ROW_TYPE, rowType));
+      userConfigQuery.addFilterQuery(String.format("%s:%s OR %s:%s", LogSearchConstants.USER_NAME, userName, LogSearchConstants.SHARE_NAME_LIST, userName));
+      userConfigQuery.addFilterQuery(String.format("%s:%s", LogSearchConstants.FILTER_NAME, SolrUtil.makeSearcableString(filterName)));
 
       if (StringUtils.isBlank(searchCriteria.getSortBy())) {
         searchCriteria.setSortBy(LogSearchConstants.FILTER_NAME);
@@ -178,7 +174,7 @@ public class UserConfigManager extends JsonManagerBase {
         searchCriteria.setSortType("" + SolrQuery.ORDER.asc);
       }
 
-      queryGenerator.setSingleSortOrder(userConfigQuery, searchCriteria);
+      setSingleSortOrder(userConfigQuery, searchCriteria);
       solrList = userConfigSolrDao.process(userConfigQuery).getResults();
 
       Collection<VUserConfig> configList = new ArrayList<VUserConfig>();
@@ -208,7 +204,7 @@ public class UserConfigManager extends JsonManagerBase {
       userConfigList.setPageSize((int) searchCriteria.getMaxRows());
 
       userConfigList.setTotalCount((long) solrList.getNumFound());
-    } catch (SolrException | SolrServerException | IOException e) {
+    } catch (SolrException e) {
       // do nothing
       logger.error(e);
       throw RESTErrorUtil.createRESTException(MessageEnums.SOLR_ERROR.getMessage().getMessage(), MessageEnums.ERROR_SYSTEM);
@@ -255,7 +251,7 @@ public class UserConfigManager extends JsonManagerBase {
     List<String> userList = new ArrayList<String>();
     try {
       SolrQuery userListQuery = new SolrQuery();
-      SolrUtil.setMainQuery(userListQuery, null);
+      userListQuery.setQuery("*:*");
       SolrUtil.setFacetField(userListQuery, LogSearchConstants.USER_NAME);
       QueryResponse queryResponse = userConfigSolrDao.process(userListQuery);
       if (queryResponse == null) {
@@ -266,10 +262,44 @@ public class UserConfigManager extends JsonManagerBase {
         String userName = cnt.getName();
         userList.add(userName);
       }
-    } catch (SolrException | SolrServerException | IOException e) {
+    } catch (SolrException e) {
       logger.warn("Error getting all users.", e);
       throw RESTErrorUtil.createRESTException(MessageEnums.SOLR_ERROR.getMessage().getMessage(), MessageEnums.ERROR_SYSTEM);
     }
     return convertObjToString(userList);
+  }
+
+  private void setSingleSortOrder(SolrQuery solrQuery, SearchCriteria searchCriteria) {
+    List<SolrQuery.SortClause> sort = new ArrayList<>();
+    if (!StringUtils.isBlank(searchCriteria.getSortBy())) {
+      SolrQuery.ORDER order = SolrQuery.ORDER.asc;
+      if (!order.toString().equalsIgnoreCase(searchCriteria.getSortType())) {
+        order = SolrQuery.ORDER.desc;
+      }
+      SolrQuery.SortClause sortOrder = SolrQuery.SortClause.create(searchCriteria.getSortBy(), order);
+      sort.add(sortOrder);
+      solrQuery.setSorts(sort);
+      logger.debug("Sort Order :-" + sort);
+    }
+  }
+
+  private void setPagination(SolrQuery solrQuery, SearchCriteria searchCriteria) {
+    Integer startIndex = null;
+    Integer maxRows = null;
+    try {
+      startIndex = (Integer) searchCriteria.getStartIndex();
+      SolrUtil.setStart(solrQuery, startIndex);
+    } catch (ClassCastException e) {
+      SolrUtil.setStart(solrQuery, 0);
+    }
+    try {
+      maxRows = (Integer) searchCriteria.getMaxRows();
+      SolrUtil.setRowCount(solrQuery, maxRows);
+    } catch (ClassCastException e) {
+      SolrUtil.setRowCount(solrQuery, 10);
+    }
+
+    if (startIndex != null && maxRows != null)
+      logger.info("Pagination was set from " + startIndex.intValue() + " to " + maxRows.intValue());
   }
 }

@@ -28,14 +28,15 @@ import java.util.List;
 import java.util.Scanner;
 import javax.annotation.PostConstruct;
 import javax.inject.Inject;
+import javax.inject.Named;
 
 import org.apache.ambari.logsearch.common.LogSearchContext;
+import org.apache.ambari.logsearch.common.LogType;
 import org.apache.ambari.logsearch.conf.SolrUserPropsConfig;
 import org.apache.ambari.logsearch.view.VLogfeederFilterWrapper;
 import org.apache.ambari.logsearch.common.LogSearchConstants;
 import org.apache.solr.client.solrj.SolrQuery;
 import org.apache.solr.client.solrj.SolrServerException;
-import org.apache.solr.client.solrj.impl.CloudSolrClient;
 import org.apache.solr.client.solrj.response.QueryResponse;
 import org.apache.solr.client.solrj.response.UpdateResponse;
 import org.apache.solr.common.SolrDocument;
@@ -47,15 +48,12 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import com.google.gson.JsonParseException;
 
-import org.apache.ambari.logsearch.manager.ManagerBase.LogType;
 import org.apache.ambari.logsearch.util.JSONUtil;
 import org.apache.log4j.Logger;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.solr.core.SolrTemplate;
-import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
-@Component
+@Named
 public class UserConfigSolrDao extends SolrDaoBase {
 
   private static final Logger LOG = Logger.getLogger(UserConfigSolrDao.class);
@@ -69,10 +67,11 @@ public class UserConfigSolrDao extends SolrDaoBase {
   private SolrCollectionDao solrCollectionDao;
 
   @Inject
+  @Named("serviceSolrFieldDao")
   private SolrSchemaFieldDao solrSchemaFieldDao;
 
   @Inject
-  @Qualifier("userConfigSolrTemplate")
+  @Named("userConfigSolrTemplate")
   private SolrTemplate userConfigSolrTemplate;
 
   public UserConfigSolrDao() {
@@ -80,10 +79,9 @@ public class UserConfigSolrDao extends SolrDaoBase {
   }
 
   @Override
-  public CloudSolrClient getSolrClient() {
-    return (CloudSolrClient) userConfigSolrTemplate.getSolrClient();
+  public SolrTemplate getSolrTemplate() {
+    return userConfigSolrTemplate;
   }
-
 
   @PostConstruct
   public void postConstructor() {
@@ -94,7 +92,7 @@ public class UserConfigSolrDao extends SolrDaoBase {
     try {
       solrCollectionDao.checkSolrStatus(getSolrClient());
       solrCollectionDao.setupCollections(getSolrClient(), solrUserConfig);
-      solrSchemaFieldDao.populateSchemaFields(getSolrClient(), solrUserConfig, this);
+      solrSchemaFieldDao.populateSchemaFields(getSolrClient(), solrUserConfig);
       intializeLogFeederFilter();
 
     } catch (Exception e) {
@@ -199,6 +197,11 @@ public class UserConfigSolrDao extends SolrDaoBase {
       }
     }
     return logfeederFilterWrapper;
+  }
+
+  @Override
+  public SolrSchemaFieldDao getSolrSchemaFieldDao() {
+    return solrSchemaFieldDao;
   }
 
   private String getHadoopServiceConfigJSON() {

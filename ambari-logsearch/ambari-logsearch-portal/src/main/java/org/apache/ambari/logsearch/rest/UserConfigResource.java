@@ -20,6 +20,7 @@
 package org.apache.ambari.logsearch.rest;
 
 import javax.inject.Inject;
+import javax.inject.Named;
 import javax.ws.rs.BeanParam;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.GET;
@@ -37,13 +38,12 @@ import org.apache.ambari.logsearch.query.model.UserConfigSearchCriteria;
 import org.apache.ambari.logsearch.view.VUserConfig;
 import org.springframework.context.annotation.Scope;
 import org.springframework.core.convert.ConversionService;
-import org.springframework.stereotype.Component;
 
 import static org.apache.ambari.logsearch.doc.DocConstants.UserConfigOperationDescriptions.*;
 
 @Api(value = "userconfig", description = "User config operations")
 @Path("userconfig")
-@Component
+@Named
 @Scope("request")
 public class UserConfigResource {
 

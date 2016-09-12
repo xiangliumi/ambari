@@ -28,17 +28,13 @@ import java.util.Date;
 import java.util.List;
 import java.util.Scanner;
 
-import org.apache.ambari.logsearch.common.LogSearchConstants;
 import org.apache.ambari.logsearch.common.MessageEnums;
 import org.apache.ambari.logsearch.model.response.LogData;
 import org.apache.ambari.logsearch.model.response.LogSearchResponse;
-import org.apache.ambari.logsearch.query.model.SearchCriteria;
 import org.apache.ambari.logsearch.dao.SolrDaoBase;
-import org.apache.ambari.logsearch.query.QueryGeneration;
 import org.apache.ambari.logsearch.util.DateUtil;
 import org.apache.ambari.logsearch.util.JSONUtil;
 import org.apache.ambari.logsearch.util.RESTErrorUtil;
-import org.apache.ambari.logsearch.util.SolrUtil;
 import org.apache.commons.lang.StringUtils;
 import org.apache.log4j.Logger;
 import org.apache.solr.client.solrj.SolrQuery;
@@ -46,29 +42,12 @@ import org.apache.solr.client.solrj.SolrServerException;
 import org.apache.solr.client.solrj.response.QueryResponse;
 import org.apache.solr.common.SolrDocumentList;
 import org.apache.solr.common.SolrException;
-
-import javax.inject.Inject;
+import org.springframework.data.solr.core.DefaultQueryParser;
+import org.springframework.data.solr.core.query.SimpleQuery;
+import org.springframework.data.solr.core.query.SolrDataQuery;
 
 public abstract class ManagerBase<LOG_DATA_TYPE extends LogData, SEARCH_RESPONSE extends LogSearchResponse> extends JsonManagerBase {
   private static final Logger logger = Logger.getLogger(ManagerBase.class);
-
-  @Inject
-  protected QueryGeneration queryGenerator;
-
-  public enum LogType {
-    SERVICE("Service"),
-    AUDIT("Audit");
-    
-    private String label;
-    
-    private LogType(String label) {
-      this.label = label;
-    }
-    
-    public String getLabel() {
-      return label;
-    }
-  }
 
   public ManagerBase() {
     super();
@@ -103,77 +82,52 @@ public abstract class ManagerBase<LOG_DATA_TYPE extends LogData, SEARCH_RESPONSE
 
   }
   
-  protected SEARCH_RESPONSE getLastPage(SearchCriteria searchCriteria, String logTimeField, SolrDaoBase solrDoaBase,
-                                    SolrQuery lastPageQuery) {
-    
-    Integer maxRows = searchCriteria.getMaxRows();
-    String givenSortType = searchCriteria.getSortType();
-    searchCriteria = new SearchCriteria();
-    searchCriteria.setSortBy(logTimeField);
-    if (givenSortType == null || givenSortType.equals(LogSearchConstants.DESCENDING_ORDER)) {
-      lastPageQuery.removeSort(LogSearchConstants.LOGTIME);
-      searchCriteria.setSortType(LogSearchConstants.ASCENDING_ORDER);
-    } else {
-      searchCriteria.setSortType(LogSearchConstants.DESCENDING_ORDER);
-    }
-    queryGenerator.setSingleSortOrder(lastPageQuery, searchCriteria);
-
-
-    Long totalLogs = 0l;
-    int startIndex = 0;
-    int numberOfLogsOnLastPage = 0;
-    SEARCH_RESPONSE logResponse = null;
-    try {
-      SolrUtil.setStart(lastPageQuery, 0);
-      SolrUtil.setRowCount(lastPageQuery, maxRows);
-      logResponse = getLogAsPaginationProvided(lastPageQuery, solrDoaBase);
-      totalLogs = countQuery(lastPageQuery,solrDoaBase);
-      startIndex = Integer.parseInt("" + ((totalLogs / maxRows) * maxRows));
-      numberOfLogsOnLastPage = Integer.parseInt("" + (totalLogs - startIndex));
-      logResponse.setStartIndex(startIndex);
-      logResponse.setTotalCount(totalLogs);
-      logResponse.setPageSize(maxRows);
-      List<LOG_DATA_TYPE> docList = logResponse.getLogList();
-      List<LOG_DATA_TYPE> lastPageDocList = new ArrayList<>();
-      logResponse.setLogList(lastPageDocList);
-      int cnt = 0;
-      for(LOG_DATA_TYPE doc:docList){
-        if(cnt<numberOfLogsOnLastPage){
-          lastPageDocList.add(doc);
-        }
-        cnt++;
+  protected SEARCH_RESPONSE getLastPage(SolrDaoBase solrDoaBase, SimpleQuery lastPageQuery, String event) {
+    int maxRows = lastPageQuery.getRows();
+    SEARCH_RESPONSE logResponse = getLogAsPaginationProvided(lastPageQuery, solrDoaBase, event);
+    Long totalLogs = solrDoaBase.count(lastPageQuery);
+    int startIndex = Integer.parseInt("" + ((totalLogs / maxRows) * maxRows));
+    int numberOfLogsOnLastPage = Integer.parseInt("" + (totalLogs - startIndex));
+    logResponse.setStartIndex(startIndex);
+    logResponse.setTotalCount(totalLogs);
+    logResponse.setPageSize(maxRows);
+    List<LOG_DATA_TYPE> docList = logResponse.getLogList();
+    List<LOG_DATA_TYPE> lastPageDocList = new ArrayList<>();
+    logResponse.setLogList(lastPageDocList);
+    int cnt = 0;
+    for (LOG_DATA_TYPE doc : docList) {
+      if (cnt < numberOfLogsOnLastPage) {
+        lastPageDocList.add(doc);
       }
-      Collections.reverse(lastPageDocList);
-
-    } catch (SolrException | SolrServerException | IOException | NumberFormatException e) {
-      logger.error("Count Query was not executed successfully",e);
-      throw RESTErrorUtil.createRESTException(MessageEnums.SOLR_ERROR.getMessage().getMessage(), MessageEnums.ERROR_SYSTEM);
+      cnt++;
     }
+    Collections.reverse(lastPageDocList);
     return logResponse;
   }
 
-  protected SEARCH_RESPONSE getLogAsPaginationProvided(SolrQuery solrQuery, SolrDaoBase solrDaoBase) {
-    try {
-      QueryResponse response = solrDaoBase.process(solrQuery);
-      SEARCH_RESPONSE logResponse = createLogSearchResponse();
-      SolrDocumentList docList = response.getResults();
-      List<LOG_DATA_TYPE> serviceLogDataList = convertToSolrBeans(response);
-      if (docList != null && !docList.isEmpty()) {
-        logResponse.setLogList(serviceLogDataList);
-        logResponse.setStartIndex((int) docList.getStart());
-        logResponse.setTotalCount(docList.getNumFound());
-        Integer rowNumber = solrQuery.getRows();
-        if (rowNumber == null) {
-          logger.error("No RowNumber was set in solrQuery");
-          return createLogSearchResponse();
-        }
-        logResponse.setPageSize(rowNumber);
+  protected SEARCH_RESPONSE getLogAsPaginationProvided(SolrDataQuery solrQuery, SolrDaoBase solrDaoBase, String event) {
+    SolrQuery query = new DefaultQueryParser().doConstructSolrQuery(solrQuery);
+    return getLogAsPaginationProvided(query, solrDaoBase, event);
+  }
+
+
+  protected SEARCH_RESPONSE getLogAsPaginationProvided(SolrQuery solrQuery, SolrDaoBase solrDaoBase, String event) {
+    QueryResponse response = solrDaoBase.process(solrQuery, event);
+    SEARCH_RESPONSE logResponse = createLogSearchResponse();
+    SolrDocumentList docList = response.getResults();
+    List<LOG_DATA_TYPE> serviceLogDataList = convertToSolrBeans(response);
+    if (docList != null && !docList.isEmpty()) {
+      logResponse.setLogList(serviceLogDataList);
+      logResponse.setStartIndex((int) docList.getStart());
+      logResponse.setTotalCount(docList.getNumFound());
+      Integer rowNumber = solrQuery.getRows();
+      if (rowNumber == null) {
+        logger.error("No RowNumber was set in solrQuery");
+        return createLogSearchResponse();
       }
-      return logResponse;
-    } catch (SolrException | SolrServerException | IOException e) {
-      logger.error("Error during solrQuery=" + solrQuery, e);
-      throw RESTErrorUtil.createRESTException(MessageEnums.SOLR_ERROR.getMessage().getMessage(), MessageEnums.ERROR_SYSTEM);
+      logResponse.setPageSize(rowNumber);
     }
+    return logResponse;
   }
   
   protected Long countQuery(SolrQuery query,SolrDaoBase solrDaoBase) throws SolrException, SolrServerException, IOException {
@@ -187,13 +141,6 @@ public abstract class ManagerBase<LOG_DATA_TYPE extends LogData, SEARCH_RESPONSE
       return 0l;
     }
     return docList.getNumFound();
-  }
-
-  protected String getUnit(String unit) {
-    if (StringUtils.isBlank(unit)) {
-      unit = "+1HOUR";
-    }
-    return unit;
   }
 
   protected String getFrom(String from) {
