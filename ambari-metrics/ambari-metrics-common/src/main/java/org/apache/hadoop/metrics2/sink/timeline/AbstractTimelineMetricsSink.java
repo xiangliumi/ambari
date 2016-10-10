@@ -51,8 +51,12 @@ import java.net.URL;
 import java.security.KeyStore;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -61,7 +65,7 @@ public abstract class AbstractTimelineMetricsSink {
   public static final String MAX_METRIC_ROW_CACHE_SIZE = "maxRowCacheSize";
   public static final String METRICS_SEND_INTERVAL = "sendInterval";
   public static final String METRICS_POST_TIMEOUT_SECONDS = "timeout";
-  public static final String COLLECTOR_PROPERTY = "collector";
+  public static final String COLLECTOR_HOSTS_PROPERTY = "collector.hosts";
   public static final String COLLECTOR_PROTOCOL = "protocol";
   public static final String COLLECTOR_PORT = "port";
   public static final String ZOOKEEPER_QUORUM = "zookeeper.quorum";
@@ -76,8 +80,9 @@ public abstract class AbstractTimelineMetricsSink {
 
   protected static final AtomicInteger failedCollectorConnectionsCounter = new AtomicInteger(0);
   public static int NUMBER_OF_SKIPPED_COLLECTOR_EXCEPTIONS = 100;
-  public int ZK_CONNECT_TRY_TIME = 10000;
+  public int ZK_CONNECT_TRY_COUNT = 10;
   public int ZK_SLEEP_BETWEEN_RETRY_TIME = 2000;
+  public boolean shardExpired = true;
 
   private SSLSocketFactory sslSocketFactory;
 
@@ -93,7 +98,7 @@ public abstract class AbstractTimelineMetricsSink {
   // well as timed refresh
   protected Supplier<String> targetCollectorHostSupplier;
 
-  protected final List<String> allKnownLiveCollectors = new ArrayList<>();
+  protected final SortedSet<String> allKnownLiveCollectors = new TreeSet<>();
 
   private volatile boolean isInitializedForHA = false;
 
@@ -125,7 +130,7 @@ public abstract class AbstractTimelineMetricsSink {
   protected void init() {
     metricSinkWriteShardStrategy = new MetricSinkWriteShardHostnameHashingStrategy(getHostname());
     collectorHAHelper = new MetricCollectorHAHelper(getZookeeperQuorum(),
-      ZK_CONNECT_TRY_TIME, ZK_SLEEP_BETWEEN_RETRY_TIME);
+      ZK_CONNECT_TRY_COUNT, ZK_SLEEP_BETWEEN_RETRY_TIME);
     isInitializedForHA = true;
   }
 
@@ -202,6 +207,8 @@ public abstract class AbstractTimelineMetricsSink {
       collectorHost = targetCollectorHostSupplier.get();
       // Last X attempts have failed - force refresh
       if (failedCollectorConnectionsCounter.get() > RETRY_COUNT_BEFORE_COLLECTOR_FAILOVER) {
+        LOG.info("Removing collector " + collectorHost + " from allKnownLiveCollectors.");
+        allKnownLiveCollectors.remove(collectorHost);
         targetCollectorHostSupplier = null;
         collectorHost = findPreferredCollectHost();
       }
@@ -211,6 +218,7 @@ public abstract class AbstractTimelineMetricsSink {
 
     String connectUrl = getCollectorUri(collectorHost);
     String jsonData = null;
+    LOG.debug("EmitMetrics connectUrl = "  + connectUrl);
     try {
       jsonData = mapper.writeValueAsString(metrics);
     } catch (IOException e) {
@@ -318,6 +326,7 @@ public abstract class AbstractTimelineMetricsSink {
       init();
     }
 
+    shardExpired = false;
     // Auto expire and re-calculate after 1 hour
     if (targetCollectorHostSupplier != null) {
       String targetCollector = targetCollectorHostSupplier.get();
@@ -326,22 +335,55 @@ public abstract class AbstractTimelineMetricsSink {
       }
     }
 
-    String collectorHosts = getConfiguredCollectors();
     // Reach out to all configured collectors before Zookeeper
-    if (collectorHosts != null && !collectorHosts.isEmpty()) {
-      String[] hosts = collectorHosts.split(",");
-      for (String hostPortStr : hosts) {
-        if (hostPortStr != null && !hostPortStr.isEmpty()) {
-          String[] hostPortPair = hostPortStr.split(":");
-          if (hostPortPair.length < 2) {
-            LOG.warn("Collector port is missing from the configuration.");
-            continue;
+    refreshCollectorsFromConfigured();
+
+    // Lookup Zookeeper for live hosts - max 10 seconds wait time
+    if (allKnownLiveCollectors.size() == 0 && getZookeeperQuorum() != null) {
+      LOG.info("No live collectors from configuration. Requesting zookeeper...");
+      allKnownLiveCollectors.addAll(collectorHAHelper.findLiveCollectorHostsFromZNode());
+    }
+
+    if (allKnownLiveCollectors.size() != 0) {
+      targetCollectorHostSupplier = Suppliers.memoizeWithExpiration(
+        new Supplier<String>() {
+          @Override
+          public String get() {
+            //shardExpired flag is used to determine if the Supplier.get() is invoked through the
+            // findPreferredCollectHost method (No need to refresh collector hosts
+            // OR
+            // through Expiry (Refresh needed to pick up dead collectors that might have not become alive).
+            if (shardExpired) {
+              refreshCollectorsFromConfigured();
+            }
+            return metricSinkWriteShardStrategy.findCollectorShard(new ArrayList<>(allKnownLiveCollectors));
           }
-          String hostStr = hostPortPair[0].trim();
-          String portStr = hostPortPair[1].trim();
-          // Check liveliness and get known instances
+        },  // random.nextInt(max - min + 1) + min # (60 to 75 minutes)
+        rand.nextInt(COLLECTOR_HOST_CACHE_MAX_EXPIRATION_MINUTES
+          - COLLECTOR_HOST_CACHE_MIN_EXPIRATION_MINUTES + 1)
+          + COLLECTOR_HOST_CACHE_MIN_EXPIRATION_MINUTES,
+        TimeUnit.MINUTES
+      );
+
+      String collectorHost = targetCollectorHostSupplier.get();
+      shardExpired = true;
+      return collectorHost;
+    }
+    LOG.warn("Couldn't find any live collectors. Returning null");
+    shardExpired = true;
+    return null;
+  }
+
+  private void refreshCollectorsFromConfigured() {
+    Collection<String> collectorHosts = getConfiguredCollectorHosts();
+
+    LOG.debug("Trying to find live collector host from : " + collectorHosts);
+    if (collectorHosts != null && !collectorHosts.isEmpty()) {
+      for (String hostStr : collectorHosts) {
+        hostStr = hostStr.trim();
+        if (!hostStr.isEmpty()) {
           try {
-            Collection<String> liveHosts = findLiveCollectorHostsFromKnownCollector(hostStr, portStr);
+            Collection<String> liveHosts = findLiveCollectorHostsFromKnownCollector(hostStr, getCollectorPort());
             // Update live Hosts - current host will already be a part of this
             for (String host : liveHosts) {
               allKnownLiveCollectors.add(host);
@@ -355,29 +397,6 @@ public abstract class AbstractTimelineMetricsSink {
         }
       }
     }
-
-    // Lookup Zookeeper for live hosts - max 10 seconds wait time
-    if (allKnownLiveCollectors.size() == 0 && getZookeeperQuorum() != null) {
-      allKnownLiveCollectors.addAll(collectorHAHelper.findLiveCollectorHostsFromZNode());
-    }
-
-    if (allKnownLiveCollectors.size() != 0) {
-      targetCollectorHostSupplier = Suppliers.memoizeWithExpiration(
-        new Supplier<String>() {
-          @Override
-          public String get() {
-            return metricSinkWriteShardStrategy.findCollectorShard(new ArrayList<>(allKnownLiveCollectors));
-          }
-        },  // random.nextInt(max - min + 1) + min # (60 to 75 minutes)
-        rand.nextInt(COLLECTOR_HOST_CACHE_MAX_EXPIRATION_MINUTES
-          - COLLECTOR_HOST_CACHE_MIN_EXPIRATION_MINUTES + 1)
-          + COLLECTOR_HOST_CACHE_MIN_EXPIRATION_MINUTES,
-        TimeUnit.MINUTES
-      );
-
-      return targetCollectorHostSupplier.get();
-    }
-    return null;
   }
 
   Collection<String> findLiveCollectorHostsFromKnownCollector(String host, String port) throws MetricCollectorUnavailableException {
@@ -428,7 +447,7 @@ public abstract class AbstractTimelineMetricsSink {
       LOG.debug(errorMessage);
       LOG.debug(ioe);
       String warnMsg = "Unable to connect to collector to find live nodes.";
-      LOG.warn(warnMsg, ioe);
+      LOG.warn(warnMsg);
       throw new MetricCollectorUnavailableException(warnMsg);
     }
     return collectors;
@@ -455,6 +474,31 @@ public abstract class AbstractTimelineMetricsSink {
     sb.append(WS_V1_TIMELINE_METRICS);
     return sb.toString();
   }
+  /**
+   * Parses input Sting of format "['host1', 'host2']" into Collection of hostnames
+   */
+  protected Collection<String> parseHostsStringIntoCollection(String hostsString) {
+    Set<String> hosts = new HashSet<>();
+
+    if (hostsString == null) {
+      LOG.error("No Metric collector configured.");
+      return hosts;
+    }
+
+    hostsString = hostsString.replace("[", "");
+    hostsString = hostsString.replace("]", "");
+    hostsString = hostsString.replace("'", "");
+
+    String [] hostNamesWithApostrophes  = hostsString.split(",");
+
+    for (String host : hostNamesWithApostrophes) {
+      host = host.trim();
+      if (host.equals("")) continue;
+      hosts.add(host);
+    }
+
+    return hosts;
+  }
 
   /**
    * Get a pre-formatted URI for the collector
@@ -462,6 +506,8 @@ public abstract class AbstractTimelineMetricsSink {
   abstract protected String getCollectorUri(String host);
 
   abstract protected String getCollectorProtocol();
+
+  abstract protected String getCollectorPort();
 
   /**
    * How soon to timeout on the emit calls in seconds.
@@ -475,10 +521,10 @@ public abstract class AbstractTimelineMetricsSink {
   abstract protected String getZookeeperQuorum();
 
   /**
-   * Get pre-configured list of collectors available
-   * @return String "host1:port,host2:port"
+   * Get pre-configured list of collectors hosts available
+   * @return Collection<String> host1,host2
    */
-  abstract protected String getConfiguredCollectors();
+  abstract protected Collection<String> getConfiguredCollectorHosts();
 
   /**
    * Get hostname used for calculating write shard.

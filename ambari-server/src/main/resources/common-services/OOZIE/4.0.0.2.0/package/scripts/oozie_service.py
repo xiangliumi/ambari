@@ -28,7 +28,7 @@ from resource_management.core import sudo
 from resource_management.core.shell import as_user
 from resource_management.core.logger import Logger
 from resource_management.core.resources.service import Service
-from resource_management.core.resources.system import Execute, File
+from resource_management.core.resources.system import Execute, File, Directory
 from resource_management.libraries.functions.format import format
 from resource_management.libraries.functions.show_logs import show_logs
 from resource_management.libraries.providers.hdfs_resource import WebHDFSUtil
@@ -170,6 +170,11 @@ def oozie_service(action = 'start', upgrade_type=None):
       raise
 
   elif action == 'stop':
+    Directory(params.oozie_tmp_dir,
+              owner=params.oozie_user,
+              create_parents = True,
+    )
+
     stop_cmd  = format("cd {oozie_tmp_dir} && {oozie_home}/bin/oozied.sh stop 60 -force")
 
     try:
